@@ -1,5 +1,6 @@
 #include <JuceHeader.h>
 #include "LoudnessMatch.h"
+#include "MeterDisplay.h"
 #include <atomic>
 
 class MatchProcessor final : public juce::AudioProcessor, private juce::Timer {
@@ -34,6 +35,7 @@ public:
         referenceAvailable=ref;
         blend.setCurrentAndTargetValue(ref && state.getRawParameterValue("original")->load()>.5f?0.:1.);
         referencePeak=processedPeak=outputPeak=0;
+        for(auto& peak:displayPeaks) peak.reset();
     }
     void releaseResources() override {}
     void finish() {
@@ -83,7 +85,8 @@ public:
             mainMax=juce::jmax(mainMax,static_cast<float>(std::max(std::abs(l),std::abs(r))));
             outMax=juce::jmax(outMax,static_cast<float>(std::max(std::abs(outL),std::abs(outR))));
         }
-        seconds=meter.seconds(); referencePeak=refMax; processedPeak=mainMax; outputPeak=outMax; ++sequence;
+        seconds=meter.seconds(); referencePeak=refMax; processedPeak=mainMax; outputPeak=outMax;
+        displayPeaks[0].capture(refMax); displayPeaks[1].capture(mainMax); displayPeaks[2].capture(outMax); ++sequence;
     }
     void processBlock(juce::AudioBuffer<float>& b,juce::MidiBuffer&) override { process(b); }
     void processBlock(juce::AudioBuffer<double>& b,juce::MidiBuffer&) override { process(b); }
@@ -91,7 +94,8 @@ public:
         const bool ref=getBus(true,1)->isEnabled(); referenceAvailable=ref; commands(ref);
         // Host bypass passes the processed main input unchanged; no learning during bypass.
         auto main=getBusBuffer(b,true,0); outputPeak=static_cast<float>(main.getMagnitude(0,main.getNumSamples()));
-        processedPeak=outputPeak.load(); referencePeak=0; ++sequence;
+        processedPeak=outputPeak.load(); referencePeak=0;
+        displayPeaks[1].capture(processedPeak.load()); displayPeaks[2].capture(outputPeak.load()); ++sequence;
     }
     void processBlockBypassed(juce::AudioBuffer<float>& b,juce::MidiBuffer&) override { bypass(b); }
     void processBlockBypassed(juce::AudioBuffer<double>& b,juce::MidiBuffer&) override { bypass(b); }
@@ -133,6 +137,7 @@ public:
     std::atomic<bool> learned{false},learning{false},referenceAvailable{false};
     std::atomic<int> command{0},outcome{0},uiSize{2};
     std::atomic<unsigned> sequence{0},revision{0};
+    std::array<DisplayPeak,3> displayPeaks;
 private:
     void timerCallback() override {
         const auto current=revision.load();
@@ -150,13 +155,13 @@ const juce::Colour cream{0xfff4eddb},ink{0xff252b29},gold{0xffd7ac61},muted{0xff
 class LevelDisplay final : public juce::Component {
 public:
     LevelDisplay() { setTitle("Signal levels"); }
-    void setLevels(float reference,float processed,float output) { values={reference,processed,output}; repaint(); }
+    void setLevelsDb(float reference,float processed,float output) { values={reference,processed,output}; repaint(); }
     void paint(juce::Graphics& g) override {
         const char* names[]{"ORIGINAL REFERENCE","PROCESSED INPUT","OUTPUT"};
         const auto bounds=getLocalBounds().toFloat();
         for(int i=0;i<3;++i) {
             const float y=static_cast<float>(i)*47;
-            const float db=juce::Decibels::gainToDecibels(values[static_cast<size_t>(i)],-60.f);
+            const float db=values[static_cast<size_t>(i)];
             g.setColour(theme::cream); g.setFont(juce::FontOptions(11.f));
             g.drawText(names[i],0,static_cast<int>(y),230,20,juce::Justification::left);
             g.drawText(db<=-60?"-- dBFS":juce::String(db,1)+" dBFS",getWidth()-110,static_cast<int>(y),110,20,juce::Justification::right);
@@ -168,7 +173,7 @@ public:
         }
     }
 private:
-    std::array<float,3> values{};
+    std::array<float,3> values{{-60.f,-60.f,-60.f}};
 };
 
 class MatchPanel final : public juce::Component, private juce::Timer {
@@ -215,7 +220,12 @@ public:
         trim.setFont(juce::FontOptions(44.f)); trim.setColour(juce::Label::textColourId,theme::gold);
         measurement.setFont(juce::FontOptions(14.f)); status.setFont(juce::FontOptions(12.f));
         route.setFont(juce::FontOptions(12.f)); route.setColour(juce::Label::textColourId,theme::gold);
-        addAndMakeVisible(levels); refresh(); setSize(840,650); startTimerHz(30);
+        addAndMakeVisible(levels);
+        targets={processor.referencePeak.load(),processor.processedPeak.load(),processor.outputPeak.load()};
+        for(size_t i=0;i<ballistics.size();++i) ballistics[i].resetPeak(targets[i]);
+        levels.setLevelsDb(ballistics[0].getLevelDb(),ballistics[1].getLevelDb(),ballistics[2].getLevelDb());
+        lastSequence=processor.sequence.load();
+        refresh(); setSize(840,650); startTimerHz(30);
     }
     ~MatchPanel() override { stopTimer(); }
     std::function<void()> sizeChanged;
@@ -263,12 +273,19 @@ private:
         if(learned && std::abs(processor.inputLufs.load()-processor.processedLufs.load()-db)>.1f) message+=" | Gain capped at 24 dB";
         if(processor.outputPeak.load()>1.f) message+=" | Output exceeds 0 dBFS";
         status.setText(message,juce::dontSendNotification);
-        const bool active=idle<16;
-        levels.setLevels(active?processor.referencePeak.load():0.f,active?processor.processedPeak.load():0.f,active?processor.outputPeak.load():0.f);
+        const bool active=idleSeconds<=.5;
         route.setText(!active?"Play audio to check the original reference":processor.referencePeak.load()>1.e-6f?"REFERENCE SIGNAL PRESENT  /  Channels selected in the host pin connector":"NO REFERENCE SIGNAL  /  Check the sender and the host pin connector",juce::dontSendNotification);
     }
     void timerCallback() override {
-        const auto seq=processor.sequence.load(); idle=seq==lastSequence?juce::jmin(idle+1,16):0; lastSequence=seq;
+        const auto now=juce::Time::getMillisecondCounterHiRes();
+        const auto elapsed=(now-lastMeterTime)*.001; lastMeterTime=now;
+        const auto seq=processor.sequence.load();
+        if(seq!=lastSequence) {
+            lastSequence=seq; idleSeconds=0;
+            for(size_t i=0;i<targets.size();++i) targets[i]=processor.displayPeaks[i].take();
+        } else idleSeconds+=elapsed;
+        for(size_t i=0;i<ballistics.size();++i) ballistics[i].advance(idleSeconds>.5?0.f:targets[i],elapsed);
+        levels.setLevelsDb(ballistics[0].getLevelDb(),ballistics[1].getLevelDb(),ballistics[2].getLevelDb());
         if(sizes.getSelectedId()!=processor.uiSize.load()) {
             sizes.setSelectedId(processor.uiSize.load(),juce::dontSendNotification); if(sizeChanged) sizeChanged();
         }
@@ -282,7 +299,9 @@ private:
     LevelDisplay levels;
     juce::TooltipWindow tooltip{this,600};
     unsigned lastSequence=0;
-    int idle=0;
+    std::array<MeterBallistics,3> ballistics;
+    std::array<float,3> targets{};
+    double lastMeterTime=juce::Time::getMillisecondCounterHiRes(),idleSeconds=0;
 };
 
 class MatchEditor final : public juce::AudioProcessorEditor {

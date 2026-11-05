@@ -15,6 +15,11 @@
   or commercial terms. The wrapper's MIT license does not relicense JUCE. For
   distribution, comply with JUCE's AGPLv3 terms (including corresponding source)
   or obtain an appropriate commercial license. Retain the bundled VST3 SDK notices.
-- `scripts/LUFS-Reference.jsfx` is an original MIT-licensed REAPER utility. It
-  copies the main stereo samples to reference output pins without modifying
-  the main samples. REAPER is a separate host and is not distributed here.
+- `Source/ReferenceProcessor.h` is an original MIT-licensed stereo reference
+  sender with a separate VST3 identity. It copies the source to a named auxiliary
+  output without modifying the main samples. REAPER is a separate host and is
+  not distributed here.
+
+- `Source/MeterDisplay.h` adapts the display-only meter ballistics from the
+  MIT-licensed ToTape Studio wrapper. Its time-based smoothing and peak capture
+  affect displays only, never audio samples or LUFS measurement.

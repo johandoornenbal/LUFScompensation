@@ -1,5 +1,6 @@
 #include <juce_audio_utils/juce_audio_utils.h>
 #include <cmath>
+#include "../Source/ReferenceProcessor.h"
 #include <iostream>
 #include <stdexcept>
 
@@ -166,8 +167,40 @@ void sizesAndState() {
     h.p->setStateInformation(malformed.getData(),static_cast<int>(malformed.getSize()));
     check(h.xml()->getDoubleAttribute("trimDb")==24 && h.xml()->getIntAttribute("uiSize")==3,"Malformed state not bounded");
 }
+// Model the host's configurable pin mapping, including reference on track 5/6.
+void referenceToMatcherChain() {
+    for(int pair:{2,4}) for(bool useDouble:{false,true}) {
+        ReferenceProcessor sender; Harness receiver;
+        sender.setProcessingPrecision(useDouble?juce::AudioProcessor::doublePrecision:juce::AudioProcessor::singlePrecision);
+        sender.prepareToPlay(48000,257); receiver.prepare(48000,useDouble); receiver.click("learnMatch");
+        auto run=[&](auto sampleType) {
+            using T=decltype(sampleType);
+            for(int block=0;block<3000;++block) {
+                juce::AudioBuffer<T> sent(4,257),track(6,257),received(4,257);
+                sent.clear(); track.clear();
+                for(int i=0;i<257;++i) for(int ch=0;ch<2;++ch)
+                    sent.setSample(ch,i,static_cast<T>(.12*std::sin((block*257+i)*(.13+ch*.03))));
+                sender.processBlock(sent,receiver.midi);
+                for(int ch=0;ch<2;++ch) {
+                    // The host maps Reference's auxiliary output to a selected track pair.
+                    track.copyFrom(pair+ch,0,sent,ch+2,0,257);
+                    track.copyFrom(ch,0,sent,ch,0,257); track.applyGain(ch,0,257,static_cast<T>(2));
+                    // The host maps that track pair to Compensation's reference input.
+                    received.copyFrom(ch,0,track,ch,0,257);
+                    received.copyFrom(ch+2,0,track,pair+ch,0,257);
+                }
+                receiver.p->processBlock(received,receiver.midi);
+                if(block==2999) for(int ch=0;ch<2;++ch) for(int i=0;i<257;++i)
+                    check(std::abs(received.getSample(ch,i)-sent.getSample(ch,i))<2.e-7,"Reference-to-matcher chain did not restore loudness");
+            }
+        };
+        if(useDouble) run(double{}); else run(float{});
+        auto learned=receiver.xml();
+        check(learned->getBoolAttribute("learned") && std::abs(learned->getDoubleAttribute("trimDb")+6.0206)<.001,"End-to-end chain learned the wrong gain");
+    }
+}
 int main() try {
     juce::ScopedJuceInitialiser_GUI init;
-    transparency(); learningAndRecall(); failedLearningAndMissingReference(); sizesAndState();
+    referenceToMatcherChain(); transparency(); learningAndRecall(); failedLearningAndMissingReference(); sizesAndState();
     std::cout<<"Stereo sidechain routing, float/double transparency, fixed LUFS gain at four rates, relearn, A/B, bypass, reset, failures, state and all UI sizes passed\n";
 } catch(const std::exception& e) { std::cerr<<e.what()<<'\n'; return 1; }
