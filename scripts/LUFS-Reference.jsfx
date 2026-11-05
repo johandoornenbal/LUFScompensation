@@ -1,0 +1,13 @@
+desc:LUFS Compensation - Original reference copy
+// MIT licensed. Put FIRST in a four-channel REAPER track's FX chain.
+// Main audio passes unchanged; channels 3/4 carry a copy for the final matcher.
+in_pin:Left
+in_pin:Right
+out_pin:Left
+out_pin:Right
+out_pin:Original left
+out_pin:Original right
+
+@sample
+spl2 = spl0;
+spl3 = spl1;
