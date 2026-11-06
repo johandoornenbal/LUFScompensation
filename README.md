@@ -68,39 +68,65 @@ but silent sidechain is actual silence when listening to Original, so verify the
 reference signal indicator before switching. Once learned, fixed gain can still
 be used without the reference, but A/B and relearning need it.
 
-## Build on Apple Silicon
+## Build, sign, and install on your Mac
 
-Install Xcode Command Line Tools and CMake 3.22+, then:
+Install Xcode Command Line Tools (`xcode-select --install`) and CMake 3.22+
+(`brew install cmake`), close your DAW, then run from the repository:
 
 ```sh
-cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
-cmake --build build-mac --config Release --parallel 3
-ctest --test-dir build-mac -C Release --output-on-failure
+bash scripts/build-sign-install-mac.sh
+```
+
+This one command builds and tests **both** Apple Silicon VST3 plugins, ad-hoc
+signs staged copies, verifies both signatures, and installs them to:
+
+- `~/Library/Audio/Plug-Ins/VST3/LUFS Reference.vst3`
+- `~/Library/Audio/Plug-Ins/VST3/LUFS Compensation.vst3`
+
+Both bundles must pass signing and verification before either existing
+installation is replaced. If replacement fails, the script attempts to restore
+both previous installations. Source bundles are left unchanged. Restart REAPER
+and rescan VST3 plugins afterwards. See [REAPER setup](docs/REAPER.md) for routing.
+
+To sign and install already downloaded/extracted bundles without compiling,
+provide **Reference first, then Compensation**, quoting paths with spaces:
+
+```sh
+bash scripts/build-sign-install-mac.sh --install-only \
+  "/path/to/LUFS Reference.vst3" \
+  "/path/to/LUFS Compensation.vst3"
+```
+
+The script targets arm64 (including M2 and later) and macOS 11+, uses no `sudo`,
+and follows the build/sign/install workflow from
+[GuitarSim](https://github.com/johandoornenbal/guitarsim). Run it in a native
+Apple Silicon terminal with Rosetta disabled. The VST3 bundles are ad-hoc signed,
+not notarized. There is no AU target.
+
+Optional `LUFS_BUILD_DIR` and `LUFS_INSTALL_DIR` environment variables override
+the build and installation folders. Extra CMake configure arguments are passed
+through, for example:
+
+```sh
+bash scripts/build-sign-install-mac.sh -DJUCE_PATH=/absolute/path/to/JUCE
 ```
 
 JUCE 8.0.12 is pinned to commit `29396c22c93392d6738e021b83196283d6e4d850`.
-To reuse an existing checkout, pass `-DJUCE_PATH=/absolute/path/to/JUCE`.
-The same build produces both:
+The default build folder is `build-mac`; it also retains both original bundles:
 
 - `build-mac/LUFSReference_artefacts/Release/VST3/LUFS Reference.vst3`
 - `build-mac/LUFSCompensation_artefacts/Release/VST3/LUFS Compensation.vst3`
 
+For the command-line options, run:
+
 ```sh
-codesign --force --deep --sign - "build-mac/LUFSReference_artefacts/Release/VST3/LUFS Reference.vst3"
-codesign --force --deep --sign - "build-mac/LUFSCompensation_artefacts/Release/VST3/LUFS Compensation.vst3"
-mkdir -p "$HOME/Library/Audio/Plug-Ins/VST3"
-ditto "build-mac/LUFSReference_artefacts/Release/VST3/LUFS Reference.vst3" \
-  "$HOME/Library/Audio/Plug-Ins/VST3/LUFS Reference.vst3"
-ditto "build-mac/LUFSCompensation_artefacts/Release/VST3/LUFS Compensation.vst3" \
-  "$HOME/Library/Audio/Plug-Ins/VST3/LUFS Compensation.vst3"
+bash scripts/build-sign-install-mac.sh --help
 ```
 
-Rescan VST3 plugins in REAPER. GitHub Actions builds, tests, ad-hoc signs, and
-archives both arm64 VST3 plugins together with the REAPER guide.
-The macOS target matches the reference repositories. macOS compilation, signing,
-and actual REAPER routing/playback require verification on macOS; the Linux
-checks do not establish that those steps work. There is no AU target.
+GitHub Actions also builds, tests, ad-hoc signs, and archives both arm64 VST3
+plugins together with the REAPER guide. Actual macOS compilation, signing,
+and REAPER routing/playback require verification on macOS; Linux checks do not
+establish that those steps work.
 
 ## Linux development and validation
 
